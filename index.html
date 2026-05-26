@@ -348,6 +348,7 @@ function onResize() {
 function buildScene() {
   scene.clear();
   rocks = []; waves = []; particles = []; enemies = []; enemyBullets = [];
+  humanoids = []; humanoidIdCounter = 0;
 
   // Lights
   const ambient = new THREE.AmbientLight(0x1a1a2e, 1.5);
@@ -430,6 +431,11 @@ function buildScene() {
   for (let i = 0; i < ENEMY_COUNT; i++) {
     spawnEnemy(i);
   }
+
+  // 人型リスポーン敵 3体
+  for (let i = 0; i < HUMANOID_COUNT; i++) {
+    spawnHumanoid(i);
+  }
 }
 
 // ─── ENEMY ────────────────────────────────────────────────────────────────
@@ -491,7 +497,208 @@ function spawnEnemy(id) {
   });
 }
 
-function getRightController() {
+// ─── 人型リスポーン敵 ──────────────────────────────────────────────────────
+const HUMANOID_COUNT = 3;
+let humanoids = [];
+let humanoidIdCounter = 0;
+
+function createHumanoidMesh(color) {
+  const group = new THREE.Group();
+  const mat = (c) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.6, metalness: 0.2 });
+
+  // 胴体
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.58, 0.22), mat(color));
+  torso.position.y = 0.9; torso.castShadow = true;
+  group.add(torso);
+
+  // 頭
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.28, 0.28), mat(color));
+  head.position.y = 1.42; head.castShadow = true;
+  // 目
+  const eyeMat = new THREE.MeshStandardMaterial({ color: 0xff2200, emissive: 0xff2200, emissiveIntensity: 3 });
+  const eyeGeo = new THREE.SphereGeometry(0.045, 6, 6);
+  const eL = new THREE.Mesh(eyeGeo, eyeMat); eL.position.set(-0.08, 0.04, 0.145);
+  const eR = new THREE.Mesh(eyeGeo, eyeMat); eR.position.set(0.08, 0.04, 0.145);
+  head.add(eL, eR);
+  group.add(head);
+
+  // 首
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.1, 6), mat(color));
+  neck.position.y = 1.24; group.add(neck);
+
+  // 腕（左右）
+  for (const side of [-1, 1]) {
+    const upperArm = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.06, 0.34, 6), mat(color));
+    upperArm.position.set(side * 0.28, 0.94, 0);
+    upperArm.rotation.z = side * 0.25;
+    upperArm.castShadow = true;
+    group.add(upperArm);
+
+    const foreArm = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.05, 0.3, 6), mat(color));
+    foreArm.position.set(side * 0.4, 0.68, 0);
+    foreArm.rotation.z = side * 0.5;
+    foreArm.castShadow = true;
+    group.add(foreArm);
+  }
+
+  // 脚（左右）
+  for (const side of [-1, 1]) {
+    const thigh = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.08, 0.38, 6), mat(color));
+    thigh.position.set(side * 0.13, 0.42, 0);
+    thigh.castShadow = true;
+    group.add(thigh);
+
+    const shin = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.06, 0.36, 6), mat(color));
+    shin.position.set(side * 0.14, 0.08, 0);
+    shin.castShadow = true;
+    group.add(shin);
+  }
+
+  // 名前ラベル（Canvas）
+  const labelCv = document.createElement('canvas');
+  labelCv.width = 128; labelCv.height = 32;
+  const lctx = labelCv.getContext('2d');
+  lctx.fillStyle = 'rgba(0,0,0,0.6)';
+  lctx.roundRect(0, 0, 128, 32, 6); lctx.fill();
+  lctx.fillStyle = '#ff6644';
+  lctx.font = 'bold 16px sans-serif';
+  lctx.textAlign = 'center';
+  lctx.fillText('⚠ 人型敵', 64, 22);
+  const labelTex = new THREE.CanvasTexture(labelCv);
+  const label = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.7, 0.18),
+    new THREE.MeshBasicMaterial({ map: labelTex, transparent: true, depthWrite: false })
+  );
+  label.position.y = 1.85;
+  group.add(label);
+
+  return { group, head, torso, label, labelTex };
+}
+
+function spawnHumanoid(id) {
+  // プレイヤーから8m以上離れたランダム位置
+  let x, z;
+  do {
+    const angle = Math.random() * Math.PI * 2;
+    const dist = 8 + Math.random() * 14;
+    x = Math.cos(angle) * dist;
+    z = Math.sin(angle) * dist;
+  } while (Math.abs(x) > ARENA_SIZE - 2 || Math.abs(z) > ARENA_SIZE - 2);
+
+  const colors = [0x22aa55, 0xaa7700, 0x6622cc];
+  const { group, head, torso, label, labelTex } = createHumanoidMesh(colors[id % colors.length]);
+  group.position.set(x, 0, z);
+  scene.add(group);
+
+  humanoids.push({
+    uid: humanoidIdCounter++,
+    id,
+    group, head, torso, label, labelTex,
+    alive: true,
+    respawnTimer: 0,
+    x, z,
+    speed: 1.8 + Math.random() * 1.2,
+    attackTimer: 1.5 + Math.random() * 2,
+    walkCycle: Math.random() * Math.PI * 2,
+    bobOffset: Math.random() * Math.PI * 2,
+  });
+}
+
+function killHumanoid(h, hitPos) {
+  h.alive = false;
+  spawnParticles(hitPos || h.group.position.clone().add(new THREE.Vector3(0,1,0)), 0xff6622, 22);
+  scene.remove(h.group);
+  score += 150;
+  updateHUD();
+  showMessage('人型敵 撃破！ +150');
+
+  // 5秒後にリスポーン
+  h.respawnTimer = 5.0;
+}
+
+function updateHumanoids(dt, time) {
+  for (const h of humanoids) {
+    if (!h.alive) {
+      // リスポーンカウントダウン
+      h.respawnTimer -= dt;
+      if (h.respawnTimer <= 0) {
+        // グループを再作成してリスポーン
+        const colors = [0x22aa55, 0xaa7700, 0x6622cc];
+        const { group, head, torso, label, labelTex } = createHumanoidMesh(colors[h.id % colors.length]);
+        let x, z;
+        do {
+          const angle = Math.random() * Math.PI * 2;
+          const dist = 8 + Math.random() * 14;
+          x = Math.cos(angle) * dist;
+          z = Math.sin(angle) * dist;
+        } while (Math.abs(x) > ARENA_SIZE - 2 || Math.abs(z) > ARENA_SIZE - 2);
+
+        group.position.set(x, 0, z);
+        scene.add(group);
+        h.group = group; h.head = head; h.torso = torso; h.label = label; h.labelTex = labelTex;
+        h.x = x; h.z = z;
+        h.alive = true;
+        h.attackTimer = 2.0 + Math.random() * 2;
+        showMessage('人型敵 リスポーン！');
+      }
+      continue;
+    }
+
+    // プレイヤーへ向かって移動
+    const toPlayer = new THREE.Vector3().subVectors(camera.position, h.group.position);
+    toPlayer.y = 0;
+    const dist = toPlayer.length();
+    toPlayer.normalize();
+
+    if (dist > 1.4) {
+      h.group.position.addScaledVector(toPlayer, h.speed * dt);
+    }
+    h.group.position.x = Math.max(-ARENA_SIZE+1, Math.min(ARENA_SIZE-1, h.group.position.x));
+    h.group.position.z = Math.max(-ARENA_SIZE+1, Math.min(ARENA_SIZE-1, h.group.position.z));
+    h.group.lookAt(camera.position.x, h.group.position.y, camera.position.z);
+
+    // 歩行アニメーション（脚のbob）
+    h.walkCycle += dt * h.speed * 3.5;
+    h.group.position.y = Math.abs(Math.sin(h.walkCycle)) * 0.06;
+
+    // ラベルを常にカメラへ向ける
+    h.label.lookAt(camera.position);
+
+    // 近接攻撃
+    h.attackTimer -= dt;
+    if (h.attackTimer <= 0 && dist < 1.8) {
+      h.attackTimer = 2.0 + Math.random() * 1.5;
+      if (!shieldActive) {
+        playerHP -= 20;
+        updateHUD();
+        flashScreen(0xff4400);
+        if (playerHP <= 0) triggerDeath();
+        else showMessage('人型敵に殴られた！');
+      } else {
+        showMessage('バリアが防いだ！');
+      }
+    }
+
+    // 弾攻撃（距離がある時）
+    if (h.attackTimer <= 0 && dist >= 1.8 && dist < 18) {
+      h.attackTimer = 2.5 + Math.random() * 2;
+      enemyAttack({ group: h.group, id: -h.uid - 1 }); // 負IDで人型敵と区別
+    }
+  }
+}
+
+function checkRockHumanoidCollision(rock) {
+  for (const h of humanoids) {
+    if (!h.alive) continue;
+    const hitPos = rock.mesh.position.clone();
+    const dist = hitPos.distanceTo(h.group.position.clone().add(new THREE.Vector3(0, 1, 0)));
+    if (dist < 1.1) {
+      killHumanoid(h, hitPos);
+      return true;
+    }
+  }
+  return false;
+}
   if (!xrSession) return null;
   for (let i = 0; i < 2; i++) {
     const src = [...xrSession.inputSources].find(s => s.handedness === 'right');
@@ -1169,6 +1376,7 @@ function xrAnimate(time, xrFrame) {
     if (r.mesh.position.y > 0) r.dir.y -= 4 * dt; // gravity
     if (r.mesh.position.y < 0) { scene.remove(r.mesh); return false; }
     if (checkRockEnemyCollision(r)) { scene.remove(r.mesh); return false; }
+    if (checkRockHumanoidCollision(r)) { scene.remove(r.mesh); return false; }
     return true;
   });
 
@@ -1241,6 +1449,9 @@ function xrAnimate(time, xrFrame) {
 
     updateEnemyBar(e);
   }
+
+  // 人型敵の更新
+  updateHumanoids(dt, time);
 
   renderer.render(scene, camera);
 }
