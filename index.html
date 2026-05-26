@@ -254,6 +254,16 @@ kbd {
     <button class="ctrl-btn" id="vr-btn" onclick="enterVR()">🥽 VRモード</button>
   </div>
 
+  <div id="vr-guide" style="display:none; position:absolute; bottom:80px; left:50%; transform:translateX(-50%);
+    background:rgba(0,0,0,0.6); border:1px solid rgba(100,200,255,0.3); border-radius:10px;
+    padding:10px 20px; font-size:12px; letter-spacing:0.08em; color:rgba(255,255,255,0.75);
+    display:none; flex-direction:column; gap:4px; text-align:center; pointer-events:none;">
+    <div style="color:rgba(100,200,255,0.9); font-size:11px; margin-bottom:2px;">── VR コントローラー操作 ──</div>
+    <div>🟦 右トリガー → 🪨 岩投げ　　🟦 右グリップ → 💨 衝撃波</div>
+    <div>🟨 左トリガー / グリップ → 🛡 バリア　　Aボタン → スキル切替</div>
+    <div>🕹 左スティック → 移動</div>
+  </div>
+
   <div id="overlay">
     <h1>超能力バトル</h1>
     <p>10人の敵を超能力で倒せ</p>
@@ -304,6 +314,7 @@ let shieldMesh = null;
 let enemyBullets = [];
 let lastEnemyAttack = 0;
 let messageTimer = 0;
+let vrControllerPrev = null;
 let frameId;
 const ENEMY_COUNT = 10;
 const ARENA_SIZE = 28;
@@ -480,22 +491,61 @@ function spawnEnemy(id) {
   });
 }
 
-// ─── SKILLS / PROJECTILES ────────────────────────────────────────────────
+function getRightController() {
+  if (!xrSession) return null;
+  for (let i = 0; i < 2; i++) {
+    const src = [...xrSession.inputSources].find(s => s.handedness === 'right');
+    if (src) {
+      // Three.jsのgetController(i)はinputSources順と一致
+      const idx = [...xrSession.inputSources].indexOf(src);
+      return renderer.xr.getController(idx >= 0 ? idx : 0);
+    }
+  }
+  return renderer.xr.getController(0);
+}
+
+function getFireDirection() {
+  const dir = new THREE.Vector3();
+  if (renderer.xr.isPresenting) {
+    const ctrl = getRightController();
+    if (ctrl) {
+      // Three.jsのXRControllerは-Z方向が「前」
+      ctrl.getWorldDirection(dir);
+      dir.negate();
+    } else {
+      camera.getWorldDirection(dir);
+    }
+  } else {
+    camera.getWorldDirection(dir);
+  }
+  return dir;
+}
+
+function getFireOrigin() {
+  const pos = new THREE.Vector3();
+  if (renderer.xr.isPresenting) {
+    const ctrl = getRightController();
+    if (ctrl) ctrl.getWorldPosition(pos);
+    else camera.getWorldPosition(pos);
+  } else {
+    camera.getWorldPosition(pos);
+  }
+  return pos;
+}
 function fireRock() {
   if (playerEnergy < 20) { showMessage('エネルギー不足！'); return; }
   playerEnergy = Math.max(0, playerEnergy - 20);
   updateHUD();
 
-  const dir = new THREE.Vector3();
-  camera.getWorldDirection(dir);
+  const dir = getFireDirection();
+  const origin = getFireOrigin();
+  origin.addScaledVector(dir, 0.5);
+  origin.y -= 0.1;
 
   const rockGeo = new THREE.DodecahedronGeometry(0.3, 0);
   const rockMat = new THREE.MeshStandardMaterial({ color: 0x886644, roughness: 0.9 });
   const mesh = new THREE.Mesh(rockGeo, rockMat);
   mesh.castShadow = true;
-
-  const origin = camera.position.clone().add(dir.clone().multiplyScalar(0.5));
-  origin.y -= 0.1;
   mesh.position.copy(origin);
 
   // Glow aura
@@ -515,11 +565,9 @@ function fireWave() {
   playerEnergy = Math.max(0, playerEnergy - 35);
   updateHUD();
 
-  const dir = new THREE.Vector3();
-  camera.getWorldDirection(dir);
-
-  const origin = camera.position.clone().add(dir.clone().multiplyScalar(0.5));
-  origin.y = camera.position.y;
+  const dir = getFireDirection();
+  const origin = getFireOrigin();
+  origin.addScaledVector(dir, 0.5);
 
   // Expand ring
   const mesh = new THREE.Mesh(
@@ -688,8 +736,7 @@ function startGame() {
   shieldActive = false;
   buildScene();
   updateHUD();
-  requestPointerLock();
-  animate();
+  if (!renderer.xr.isPresenting) requestPointerLock();
 }
 
 function restartGame() {
@@ -754,56 +801,229 @@ function fireSkill() {
 
 // ─── VR ───────────────────────────────────────────────────────────────────
 async function enterVR() {
-  if (!navigator.xr) { alert('このブラウザはWebXRに対応していません。\nOculus BrowserまたはChrome for Androidをお試しください。'); return; }
+  if (!navigator.xr) { alert('このブラウザはWebXRに対応していません。\nMeta Quest BrowserまたはChrome for Androidをお試しください。'); return; }
   const supported = await navigator.xr.isSessionSupported('immersive-vr').catch(() => false);
   if (!supported) { alert('VRデバイスが検出されません。\nVRゴーグルを接続してください。'); return; }
-  const session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor'] });
-  renderer.xr.setSession(session);
-  xrSession = session;
-  session.addEventListener('end', () => { xrSession = null; });
+
   if (!gameRunning) startGame();
+
+  const session = await navigator.xr.requestSession('immersive-vr', {
+    optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
+  });
+  await renderer.xr.setSession(session);
+  xrSession = session;
+  document.getElementById('vr-guide').style.display = 'flex';
+
+  // rigをリセット
+  if (cameraRig) { scene.remove(cameraRig); cameraRig = null; }
+  cameraRig = new THREE.Group();
+  cameraRig.position.set(camera.position.x, 0, camera.position.z);
+  scene.add(cameraRig);
+  cameraRig.add(camera);
+  camera.position.set(0, 0, 0);
+
+  // VRコントローラーセットアップ
+  vrControllerPrev = {};
+
+  for (let i = 0; i < 2; i++) {
+    const ctrl = renderer.xr.getController(i);
+
+    // ※ rigに追加する前にリスナー登録（Three.js r128の仕様）
+    ctrl.addEventListener('connected', (ev) => {
+      const hand = ev.data.handedness;
+      // コントローラーが接続されたタイミングでビジュアルを構築
+      while (ctrl.children.length > 0) ctrl.remove(ctrl.children[0]);
+
+      const ctrlMesh = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.02, 0.03, 0.12, 8),
+        new THREE.MeshStandardMaterial({ color: hand === 'right' ? 0x223355 : 0x332211 })
+      );
+      ctrlMesh.rotation.x = -Math.PI / 4;
+      ctrl.add(ctrlMesh);
+
+      if (hand === 'right') {
+        const laserGeo = new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -12)
+        ]);
+        ctrl.add(new THREE.Line(laserGeo,
+          new THREE.LineBasicMaterial({ color: 0x00aaff, transparent: true, opacity: 0.5 })));
+      }
+    });
+
+    // selectstart（トリガー押下）と squeezestart（グリップ押下）
+    // handednessはイベント時点のxrSession.inputSourcesから判断
+    ctrl.addEventListener('selectstart', () => {
+      if (!gameRunning) return;
+      const src = xrSession ? [...xrSession.inputSources][i] : null;
+      const hand = src ? src.handedness : (i === 0 ? 'right' : 'left');
+      if (hand === 'right') fireRock();
+      else activateShield();
+    });
+    ctrl.addEventListener('squeezestart', () => {
+      if (!gameRunning) return;
+      const src = xrSession ? [...xrSession.inputSources][i] : null;
+      const hand = src ? src.handedness : (i === 0 ? 'right' : 'left');
+      if (hand === 'right') fireWave();
+      else activateShield();
+    });
+
+    cameraRig.add(ctrl);
+  }
+
+  session.addEventListener('end', () => {
+    xrSession = null;
+    vrControllerPrev = null;
+    document.getElementById('vr-guide').style.display = 'none';
+    if (cameraRig) {
+      const wp = new THREE.Vector3();
+      camera.getWorldPosition(wp);
+      cameraRig.remove(camera);
+      scene.add(camera);
+      camera.position.copy(wp);
+      camera.position.y = 1.7;
+      cameraRig = null;
+    }
+  });
 }
 
 // ─── MAIN LOOP ────────────────────────────────────────────────────────────
 let lastTime = 0;
-function animate(time = 0) {
-  frameId = renderer.xr.isPresenting
-    ? renderer.setAnimationLoop(xrAnimate)
-    : requestAnimationFrame(animate);
-  if (!renderer.xr.isPresenting) xrAnimate(time);
+let cameraRig = null; // XR用の親グループ
+
+function animate() {
+  // setAnimationLoop一本化：VR中も非VR中も同じループを使う
+  renderer.setAnimationLoop(xrAnimate);
 }
 
-function xrAnimate(time) {
+function xrAnimate(time, xrFrame) {
+  if (time === null) time = 0;
   const dt = Math.min((time - lastTime) / 1000, 0.05);
   lastTime = time;
   if (!gameRunning) { renderer.render(scene, camera); return; }
 
+  const isVR = renderer.xr.isPresenting;
+
   // Player movement
   const moveSpeed = 5 * dt;
-  const forward = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
-  const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
-  const moveDir = new THREE.Vector3();
-  if (keys['KeyW'] || keys['ArrowUp']) moveDir.add(forward);
-  if (keys['KeyS'] || keys['ArrowDown']) moveDir.sub(forward);
-  if (keys['KeyA'] || keys['ArrowLeft']) moveDir.sub(right);
-  if (keys['KeyD'] || keys['ArrowRight']) moveDir.add(right);
-  if (moveDir.length() > 0) {
-    moveDir.normalize();
-    camera.position.addScaledVector(moveDir, moveSpeed);
-    // Arena bounds
-    camera.position.x = Math.max(-ARENA_SIZE + 1, Math.min(ARENA_SIZE - 1, camera.position.x));
-    camera.position.z = Math.max(-ARENA_SIZE + 1, Math.min(ARENA_SIZE - 1, camera.position.z));
+  if (isVR) {
+    // VRモード：rigを動かす（カメラはXRが制御）
+    if (!cameraRig) {
+      cameraRig = new THREE.Group();
+      cameraRig.position.set(0, 0, 0);
+      scene.add(cameraRig);
+      cameraRig.add(camera);
+    }
+    // VR中の移動方向はカメラのワールド向きから取得
+    const vrForward = new THREE.Vector3();
+    camera.getWorldDirection(vrForward);
+    vrForward.y = 0; vrForward.normalize();
+    const vrRight = new THREE.Vector3().crossVectors(vrForward, new THREE.Vector3(0,1,0));
+    const moveDir = new THREE.Vector3();
+    if (keys['KeyW'] || keys['ArrowUp']) moveDir.add(vrForward);
+    if (keys['KeyS'] || keys['ArrowDown']) moveDir.sub(vrForward);
+    if (keys['KeyA'] || keys['ArrowLeft']) moveDir.sub(vrRight);
+    if (keys['KeyD'] || keys['ArrowRight']) moveDir.add(vrRight);
+    if (moveDir.length() > 0) {
+      moveDir.normalize();
+      cameraRig.position.addScaledVector(moveDir, moveSpeed);
+      cameraRig.position.x = Math.max(-ARENA_SIZE+1, Math.min(ARENA_SIZE-1, cameraRig.position.x));
+      cameraRig.position.z = Math.max(-ARENA_SIZE+1, Math.min(ARENA_SIZE-1, cameraRig.position.z));
+    }
+    // y固定しない（XRのヘッドトラッキングに任せる）
+  } else {
+    // 非VRモード：直接cameraを操作
+    const forward = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+    const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+    const moveDir = new THREE.Vector3();
+    if (keys['KeyW'] || keys['ArrowUp']) moveDir.add(forward);
+    if (keys['KeyS'] || keys['ArrowDown']) moveDir.sub(forward);
+    if (keys['KeyA'] || keys['ArrowLeft']) moveDir.sub(right);
+    if (keys['KeyD'] || keys['ArrowRight']) moveDir.add(right);
+    if (moveDir.length() > 0) {
+      moveDir.normalize();
+      camera.position.addScaledVector(moveDir, moveSpeed);
+      camera.position.x = Math.max(-ARENA_SIZE + 1, Math.min(ARENA_SIZE - 1, camera.position.x));
+      camera.position.z = Math.max(-ARENA_SIZE + 1, Math.min(ARENA_SIZE - 1, camera.position.z));
+    }
+    camera.position.y = 1.7;
+    camera.rotation.order = 'YXZ';
+    camera.rotation.y = yaw;
+    camera.rotation.x = pitch;
   }
-  camera.position.y = 1.7;
-
-  // Camera rotation
-  camera.rotation.order = 'YXZ';
-  camera.rotation.y = yaw;
-  camera.rotation.x = pitch;
 
   // Energy regen
   energyRegen += dt;
   if (energyRegen > 0.5) { energyRegen = 0; playerEnergy = Math.min(playerMaxEnergy, playerEnergy + 5); updateHUD(); }
+
+  // ─── VRコントローラー入力 ────────────────────────────────────────────
+  if (isVR && gameRunning) {
+    // inputSourcesはxrFrameのセッションから、またはxrSessionから直接取得
+    const sources = (xrFrame && xrFrame.session)
+      ? xrFrame.session.inputSources
+      : (xrSession ? xrSession.inputSources : []);
+
+    if (!vrControllerPrev) vrControllerPrev = {};
+
+    for (const src of sources) {
+      const gp = src.gamepad;
+      if (!gp || !gp.buttons) continue;
+
+      const hand = src.handedness; // 'right' | 'left' | 'none'
+      if (!vrControllerPrev[hand]) {
+        vrControllerPrev[hand] = { trigger: false, grip: false, btnAX: false };
+      }
+      const prev = vrControllerPrev[hand];
+
+      // Meta Quest / 標準WebXR Gamepad ボタン配列:
+      //   buttons[0] = trigger（人差し指）
+      //   buttons[1] = grip（中指）
+      //   buttons[4] = A(右) / X(左)
+      //   buttons[5] = B(右) / Y(左)
+      // pressedフラグが実装されていない機種もあるためvalueも見る
+      const triggerBtn = gp.buttons[0];
+      const gripBtn    = gp.buttons[1];
+      const axBtn      = gp.buttons[4];
+
+      const trigger = triggerBtn ? (triggerBtn.pressed || triggerBtn.value > 0.5) : false;
+      const grip    = gripBtn    ? (gripBtn.pressed    || gripBtn.value    > 0.5) : false;
+      const btnAX   = axBtn      ? (axBtn.pressed      || axBtn.value      > 0.5) : false;
+
+      // エッジ検出（押した瞬間だけ発火）
+      if (trigger && !prev.trigger) {
+        if (hand === 'right') fireRock();
+        else                  activateShield();
+      }
+      if (grip && !prev.grip) {
+        if (hand === 'right') fireWave();
+        else                  activateShield();
+      }
+      if (btnAX && !prev.btnAX) {
+        const skills = ['rock', 'wave', 'shield'];
+        selectSkill(skills[(skills.indexOf(currentSkill) + 1) % skills.length]);
+      }
+
+      // 左スティックで移動（axes[2]/axes[3] がサムスティック、axes[0]/axes[1] はタッチパッド）
+      if (hand === 'left' && gp.axes && gp.axes.length >= 2) {
+        const ax = gp.axes.length >= 4 ? gp.axes[2] : gp.axes[0];
+        const ay = gp.axes.length >= 4 ? gp.axes[3] : gp.axes[1];
+        if (Math.abs(ax) > 0.15 || Math.abs(ay) > 0.15) {
+          const vrForward = new THREE.Vector3();
+          camera.getWorldDirection(vrForward); vrForward.y = 0; vrForward.normalize();
+          const vrRight = new THREE.Vector3().crossVectors(vrForward, new THREE.Vector3(0,1,0));
+          if (cameraRig) {
+            cameraRig.position.addScaledVector(vrForward, -ay * moveSpeed * 2.5);
+            cameraRig.position.addScaledVector(vrRight,    ax * moveSpeed * 2.5);
+            cameraRig.position.x = Math.max(-ARENA_SIZE+1, Math.min(ARENA_SIZE-1, cameraRig.position.x));
+            cameraRig.position.z = Math.max(-ARENA_SIZE+1, Math.min(ARENA_SIZE-1, cameraRig.position.z));
+          }
+        }
+      }
+
+      prev.trigger = trigger;
+      prev.grip    = grip;
+      prev.btnAX   = btnAX;
+    }
+  }
 
   // Shield timer
   if (shieldActive) {
@@ -911,8 +1131,8 @@ function xrAnimate(time) {
 
 // ─── INIT ──────────────────────────────────────────────────────────────────
 initRenderer();
-renderer.setAnimationLoop(null);
-requestAnimationFrame(animate);
+// 最初からsetAnimationLoopで動かす（VR移行もシームレスに）
+renderer.setAnimationLoop(xrAnimate);
 
 // Expose for buttons
 window.selectSkill = selectSkill;
