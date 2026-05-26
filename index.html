@@ -825,22 +825,115 @@ async function enterVR() {
   // VRコントローラーセットアップ
   vrControllerPrev = {};
 
+  // コントローラーパネルのCanvasテクスチャ生成
+  function makeControllerPanel(hand) {
+    const w = 512, h = 300;
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const cx = cv.getContext('2d');
+
+    function draw(highlights) {
+      cx.clearRect(0, 0, w, h);
+      // 背景
+      cx.fillStyle = 'rgba(5,15,30,0.92)';
+      cx.roundRect(0, 0, w, h, 24); cx.fill();
+      cx.strokeStyle = hand === 'right' ? 'rgba(80,180,255,0.7)' : 'rgba(255,160,80,0.7)';
+      cx.lineWidth = 3;
+      cx.roundRect(2, 2, w-4, h-4, 22); cx.stroke();
+
+      // タイトル
+      cx.fillStyle = hand === 'right' ? '#60c8ff' : '#ffb060';
+      cx.font = 'bold 28px sans-serif';
+      cx.textAlign = 'center';
+      cx.fillText(hand === 'right' ? '右コントローラー' : '左コントローラー', w/2, 44);
+
+      // 区切り線
+      cx.strokeStyle = 'rgba(255,255,255,0.15)';
+      cx.lineWidth = 1;
+      cx.beginPath(); cx.moveTo(24, 58); cx.lineTo(w-24, 58); cx.stroke();
+
+      const rows = hand === 'right'
+        ? [
+            { icon: '🪨', btn: 'トリガー（人差し指）', action: '岩投げ', key: 'trigger' },
+            { icon: '💨', btn: 'グリップ（中指）',     action: '衝撃波', key: 'grip' },
+            { icon: '🔄', btn: 'Aボタン',              action: 'スキル切替', key: 'btnAX' },
+          ]
+        : [
+            { icon: '🛡', btn: 'トリガー（人差し指）', action: 'バリア展開', key: 'trigger' },
+            { icon: '🛡', btn: 'グリップ（中指）',     action: 'バリア展開', key: 'grip' },
+            { icon: '🕹', btn: '左スティック',          action: '移動',      key: null },
+          ];
+
+      rows.forEach((row, idx) => {
+        const y = 85 + idx * 72;
+        const active = highlights && highlights[row.key];
+
+        // 行背景（アクティブ時に光る）
+        if (active) {
+          cx.fillStyle = hand === 'right' ? 'rgba(60,160,255,0.25)' : 'rgba(255,140,40,0.25)';
+          cx.roundRect(16, y - 6, w - 32, 60, 12); cx.fill();
+        }
+
+        // アイコン
+        cx.font = '32px serif';
+        cx.textAlign = 'left';
+        cx.fillText(row.icon, 28, y + 36);
+
+        // ボタン名
+        cx.font = active ? 'bold 20px sans-serif' : '18px sans-serif';
+        cx.fillStyle = active
+          ? (hand === 'right' ? '#80d8ff' : '#ffd080')
+          : 'rgba(255,255,255,0.55)';
+        cx.textAlign = 'left';
+        cx.fillText(row.btn, 76, y + 22);
+
+        // アクション
+        cx.font = active ? 'bold 26px sans-serif' : '24px sans-serif';
+        cx.fillStyle = active ? '#ffffff' : 'rgba(255,255,255,0.85)';
+        cx.fillText('→ ' + row.action, 76, y + 50);
+      });
+    }
+
+    const tex = new THREE.CanvasTexture(cv);
+    return { tex, draw, cv };
+  }
+
   for (let i = 0; i < 2; i++) {
     const ctrl = renderer.xr.getController(i);
 
-    // ※ rigに追加する前にリスナー登録（Three.js r128の仕様）
     ctrl.addEventListener('connected', (ev) => {
       const hand = ev.data.handedness;
-      // コントローラーが接続されたタイミングでビジュアルを構築
       while (ctrl.children.length > 0) ctrl.remove(ctrl.children[0]);
 
+      // コントローラー本体メッシュ
       const ctrlMesh = new THREE.Mesh(
         new THREE.CylinderGeometry(0.02, 0.03, 0.12, 8),
-        new THREE.MeshStandardMaterial({ color: hand === 'right' ? 0x223355 : 0x332211 })
+        new THREE.MeshStandardMaterial({ color: hand === 'right' ? 0x223355 : 0x442211 })
       );
       ctrlMesh.rotation.x = -Math.PI / 4;
       ctrl.add(ctrlMesh);
 
+      // ── ボタン説明パネル ──────────────────────────────────────
+      const { tex, draw } = makeControllerPanel(hand);
+      draw(null);
+
+      const panelMesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.28, 0.165),
+        new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, side: THREE.DoubleSide })
+      );
+      // コントローラーの少し上・前方に配置
+      panelMesh.position.set(hand === 'right' ? 0.05 : -0.05, 0.14, -0.06);
+      panelMesh.rotation.x = -0.4;
+      ctrl.add(panelMesh);
+
+      // パネルの枠にうっすらポイントライト
+      const pLight = new THREE.PointLight(
+        hand === 'right' ? 0x3388ff : 0xff8833, 0.4, 0.5
+      );
+      pLight.position.copy(panelMesh.position);
+      ctrl.add(pLight);
+
+      // レーザーポインター（右のみ）
       if (hand === 'right') {
         const laserGeo = new THREE.BufferGeometry().setFromPoints([
           new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -12)
@@ -848,27 +941,42 @@ async function enterVR() {
         ctrl.add(new THREE.Line(laserGeo,
           new THREE.LineBasicMaterial({ color: 0x00aaff, transparent: true, opacity: 0.5 })));
       }
+
+      // パネルとdrawをコントローラーに紐付けて後からハイライト更新できるように
+      ctrl.userData.panelTex = tex;
+      ctrl.userData.panelDraw = draw;
+      ctrl.userData.hand = hand;
     });
 
-    // selectstart（トリガー押下）と squeezestart（グリップ押下）
-    // handednessはイベント時点のxrSession.inputSourcesから判断
     ctrl.addEventListener('selectstart', () => {
       if (!gameRunning) return;
       const src = xrSession ? [...xrSession.inputSources][i] : null;
       const hand = src ? src.handedness : (i === 0 ? 'right' : 'left');
+      if (ctrl.userData.panelDraw) { ctrl.userData.panelDraw({ trigger: true }); ctrl.userData.panelTex.needsUpdate = true; }
       if (hand === 'right') fireRock();
       else activateShield();
+    });
+    ctrl.addEventListener('selectend', () => {
+      if (ctrl.userData.panelDraw) { ctrl.userData.panelDraw(null); ctrl.userData.panelTex.needsUpdate = true; }
     });
     ctrl.addEventListener('squeezestart', () => {
       if (!gameRunning) return;
       const src = xrSession ? [...xrSession.inputSources][i] : null;
       const hand = src ? src.handedness : (i === 0 ? 'right' : 'left');
+      if (ctrl.userData.panelDraw) { ctrl.userData.panelDraw({ grip: true }); ctrl.userData.panelTex.needsUpdate = true; }
       if (hand === 'right') fireWave();
       else activateShield();
+    });
+    ctrl.addEventListener('squeezeend', () => {
+      if (ctrl.userData.panelDraw) { ctrl.userData.panelDraw(null); ctrl.userData.panelTex.needsUpdate = true; }
     });
 
     cameraRig.add(ctrl);
   }
+
+  // gamepadポーリングでAボタン押下時もパネルハイライト
+  // (ループ内のbtnAX検出時に ctrl.userData.panelDraw を呼ぶためctrlsを保存)
+  window._vrCtrls = [renderer.xr.getController(0), renderer.xr.getController(1)];
 
   session.addEventListener('end', () => {
     xrSession = null;
@@ -1000,6 +1108,14 @@ function xrAnimate(time, xrFrame) {
       if (btnAX && !prev.btnAX) {
         const skills = ['rock', 'wave', 'shield'];
         selectSkill(skills[(skills.indexOf(currentSkill) + 1) % skills.length]);
+        // Aボタンパネルハイライト
+        if (window._vrCtrls) {
+          const c = window._vrCtrls.find(c => c.userData.hand === hand);
+          if (c && c.userData.panelDraw) {
+            c.userData.panelDraw({ btnAX: true }); c.userData.panelTex.needsUpdate = true;
+            setTimeout(() => { if (c.userData.panelDraw) { c.userData.panelDraw(null); c.userData.panelTex.needsUpdate = true; } }, 300);
+          }
+        }
       }
 
       // 左スティックで移動（axes[2]/axes[3] がサムスティック、axes[0]/axes[1] はタッチパッド）
